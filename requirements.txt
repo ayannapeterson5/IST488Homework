@@ -1,4 +1,13 @@
 streamlit
+requests
 openai
-pymupdf
+
+
+
+
+
+
+
+
+
 
