@@ -1,20 +1,16 @@
 import streamlit as st
+from pathlib import Path
 
-st.set_page_config(
-    page_title="Homework Manager",
-    layout="centered"
-)
+st.set_page_config(page_title="IST488 Homework", layout="centered")
 
-st.title("Homework Manager")
-st.write("Select a homework from the sidebar.")
+choice = st.sidebar.radio("Select a page", ["HW 1", "HW 2", "HW 3"])
 
-##Navigation 
-
-hw1 = st.Page("HW/HW1.py", title = "HW 1")
-hw2 = st.Page("HW/HW2.py", title="HW 2")
-
-pg = st.navigation([hw1, hw2])
-pg.run()
+if choice == "HW 1":
+    exec(Path("HW/HW1.py").read_text(), {})
+elif choice == "HW 2":
+    exec(Path("HW/HW2.py").read_text(), {})
+else:
+    exec(Path("HW/HW3.py").read_text(), {})
 
 
 
