@@ -38,7 +38,7 @@ if uploaded_file and question:
     ]
 
     stream = client.chat.completions.create(
-        model="gpt-5-chat-latest",
+        model="gpt-4o",
         messages=messages,
         stream=True,
     )

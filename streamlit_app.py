@@ -1,11 +1,20 @@
-choice = st.sidebar.radio("Select assignment", ["HW 1", "HW 2", "HW 3"])
+import streamlit as st
 
-if choice == "HW 1":
-    exec(Path("HW/HW1.py").read_text(), {})
-elif choice == "HW 2":
-    exec(Path("HW/HW2.py").read_text(), {})
-else:
-    exec(Path("HW/HW3.py").read_text(), {})
+exec(Path("pages/3_HW3.py").read_text(), {"st": st})
+
+
+st.set_page_config(page_title="Homework Manager", layout="wide")
+
+st.title("Homework Manager")
+st.write("Use the sidebar to choose an assignment page (HW1, HW2, HW3).")
+
+st.sidebar.success("Select a homework page above 👆")
+
+st.info(
+    "If Streamlit Cloud is failing, check that your requirements.txt is in the repo root "
+    "and you committed/pushed it."
+)
+
 
 
 

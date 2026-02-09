@@ -112,12 +112,20 @@ def build_token_buffer(all_messages: list[dict], max_tokens: int) -> list[dict]:
 # CLIENTS (OpenAI + Anthropic)
 # -----------------------------
 if "client" not in st.session_state:
-    st.session_state.client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    try:
+        st.session_state.client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
+    except Exception as e:
+        st.error(f"Failed to initialize OpenAI client: {e}")
+        st.stop()
 
 if "anthropic_client" not in st.session_state:
-    st.session_state.anthropic_client = anthropic.Anthropic(
-        api_key=st.secrets["ANTHROPIC_API_KEY"]
-    )
+    try:
+        st.session_state.anthropic_client = anthropic.Anthropic(
+            api_key=st.secrets.get("ANTHROPIC_API_KEY", "")
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize Anthropic client: {e}")
+        st.stop()
 
 
 # -----------------------------

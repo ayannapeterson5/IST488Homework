@@ -1,28 +1,23 @@
 import streamlit as st
 from openai import OpenAI
-import time
-
-# NEW (HW3): URL reading
 import requests
-from bs4 import BeautifulSoup
-
-# NEW (HW3): 2nd vendor
-import anthropic
-
+import time
+import re
+from html import unescape
 
 # -----------------------------
-# MODELS (HW3: 2 vendors, premium models)
+# MODELS
 # -----------------------------
-OPENAI_MODEL = "gpt-4o"                  # premium OpenAI
-ANTHROPIC_MODEL = "claude-3-opus-20240229"  # premium Anthropic
+OPENAI_MODEL = "gpt-4o"
+ANTHROPIC_MODEL = "claude-3-opus-20240229"
 
-MAX_TOKENS = 2000  # token budget for input buffer (rough estimate)
+MAX_TOKENS = 2000
 MAX_OUTPUT_TOKENS = 800
 
 st.title("HW 3 – Streaming Chatbot w/ URL Context + Conversation Buffer")
 
 # -----------------------------
-# SIDEBAR OPTIONS (HW3)
+# SIDEBAR OPTIONS
 # -----------------------------
 st.sidebar.header("Options")
 
@@ -37,45 +32,44 @@ vendor_choice = st.sidebar.selectbox(
     ],
 )
 
-# HW3 requirement: describe how it works at top of page
 st.write(
     """
 **How this chatbot works**
 - You can input up to **two URLs** in the sidebar.
-- The app reads the text from those pages and inserts it into the **system prompt** (permanent context).
+- The app reads text from those pages and inserts it into the **system prompt** (permanent context).
 - Conversation memory uses a **token-buffer**: the system prompt is always kept, plus as many recent messages as fit.
 - The assistant response is displayed with a **streaming/typewriter** effect.
 """
 )
 
+# -----------------------------
+# SIMPLE HTML → TEXT (no bs4 needed)
+# -----------------------------
+def html_to_text(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
+    html = re.sub(r"(?is)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?is)</p\s*>", "\n", html)
+    html = re.sub(r"(?is)<.*?>", " ", html)
+    text = unescape(html)
+    lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return "\n".join(lines)
 
-# -----------------------------
-# URL READER (re-use HW2 idea)
-# -----------------------------
 def read_url_content(url: str) -> str:
     try:
         r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # remove noisy tags
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-
-        text = soup.get_text(separator="\n")
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        return "\n".join(lines)
+        text = html_to_text(r.text)
+        # prevent massive prompts
+        return text[:12000] if len(text) > 12000 else text
     except Exception as e:
         return f"[Could not load {url}. Error: {e}]"
 
-
 # -----------------------------
-# TOKEN BUFFER HELPERS (your code)
+# TOKEN BUFFER HELPERS
 # -----------------------------
 def rough_tokens(text: str) -> int:
-    # Rough estimate: ~1 token per ~4 characters
     return max(1, len(text) // 4)
-
 
 def rough_tokens_messages(messages: list[dict]) -> int:
     total = 0
@@ -84,51 +78,42 @@ def rough_tokens_messages(messages: list[dict]) -> int:
         total += rough_tokens(m.get("content", ""))
     return total
 
-
 def build_token_buffer(all_messages: list[dict], max_tokens: int) -> list[dict]:
-    """
-    Keeps the system prompt + as many recent messages as fit under max_tokens.
-    (Important: never drop the system prompt.)
-    """
     if not all_messages:
         return []
 
-    system_msg = all_messages[0]  # keep system prompt
+    system_msg = all_messages[0]
     kept = [system_msg]
     used = rough_tokens_messages(kept)
 
-    # Add messages from the end (most recent first) until we hit budget
     for msg in reversed(all_messages[1:]):
         msg_tokens = rough_tokens_messages([msg])
         if used + msg_tokens > max_tokens:
             break
-        kept.insert(1, msg)  # insert after system
+        kept.insert(1, msg)
         used += msg_tokens
 
     return kept
 
+# -----------------------------
+# CLIENTS (OpenAI + Anthropic) — safe init
+# -----------------------------
+OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
+ANTHROPIC_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
-# -----------------------------
-# CLIENTS (OpenAI + Anthropic)
-# -----------------------------
-if "client" not in st.session_state:
-    st.session_state.client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+if "openai_client" not in st.session_state:
+    st.session_state.openai_client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 if "anthropic_client" not in st.session_state:
-    st.session_state.anthropic_client = anthropic.Anthropic(
-        api_key=st.secrets["ANTHROPIC_API_KEY"]
-    )
-
+    st.session_state.anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
 
 # -----------------------------
-# SYSTEM PROMPT (HW3: URLs as permanent context)
+# SYSTEM PROMPT (URLs as permanent context)
 # -----------------------------
 def build_system_prompt(u1: str, u2: str) -> str:
     docs = []
-
     if u1.strip():
         docs.append(f"URL 1: {u1}\n\n{read_url_content(u1)}")
-
     if u2.strip():
         docs.append(f"URL 2: {u2}\n\n{read_url_content(u2)}")
 
@@ -142,31 +127,20 @@ def build_system_prompt(u1: str, u2: str) -> str:
         f"{docs_text}"
     )
 
-
-# If URLs change, reset messages so the system prompt matches the new URLs
 current_urls = (url_1.strip(), url_2.strip())
 if "last_urls" not in st.session_state:
     st.session_state.last_urls = None
 
 if ("messages" not in st.session_state) or (st.session_state.last_urls != current_urls):
-    st.session_state.messages = [
-        {"role": "system", "content": build_system_prompt(*current_urls)}
-    ]
+    st.session_state.messages = [{"role": "system", "content": build_system_prompt(*current_urls)}]
     st.session_state.last_urls = current_urls
-
-    # reset yes/no state when context resets
     st.session_state.waiting_for_more_info = False
 
-
-# -----------------------------
-# Lab Part C: yes/no loop state (your code)
-# -----------------------------
 if "waiting_for_more_info" not in st.session_state:
     st.session_state.waiting_for_more_info = False
 
-
 # -----------------------------
-# DISPLAY CHAT HISTORY (your code)
+# DISPLAY CHAT HISTORY
 # -----------------------------
 for msg in st.session_state.messages:
     if msg["role"] == "system":
@@ -174,30 +148,31 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-
 # -----------------------------
-# STREAMING (your code)
+# STREAMING
 # -----------------------------
 def stream_text(text: str):
     for ch in text:
         yield ch
         time.sleep(0.01)
 
-
 # -----------------------------
 # CALL MODELS
 # -----------------------------
 def call_openai(messages_for_model: list[dict]) -> str:
-    completion = st.session_state.client.chat.completions.create(
+    if st.session_state.openai_client is None:
+        return "OpenAI key not found. Add OPENAI_API_KEY to Streamlit secrets."
+    completion = st.session_state.openai_client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages_for_model,
         temperature=0,
     )
     return completion.choices[0].message.content
 
-
 def call_anthropic(messages_for_model: list[dict]) -> str:
-    # Anthropic expects system separately; messages must NOT include role="system"
+    if st.session_state.anthropic_client is None:
+        return "Anthropic key not found. Add ANTHROPIC_API_KEY to Streamlit secrets."
+
     system_prompt = messages_for_model[0]["content"]
     convo_msgs = [
         {"role": m["role"], "content": m["content"]}
@@ -214,9 +189,8 @@ def call_anthropic(messages_for_model: list[dict]) -> str:
     )
     return resp.content[0].text
 
-
 # -----------------------------
-# CHAT INPUT + LOGIC (your code, minimal edits)
+# CHAT INPUT + LOGIC
 # -----------------------------
 prompt = st.chat_input("Say something...")
 
@@ -226,12 +200,9 @@ if prompt:
 
     if st.session_state.waiting_for_more_info:
         if user_lower in ["yes", "y"]:
-            st.session_state.messages.append(
-                {"role": "user", "content": "Yes, please give me more info."}
-            )
+            st.session_state.messages.append({"role": "user", "content": "Yes, please give me more info."})
             with st.chat_message("user"):
                 st.write("Yes")
-
         elif user_lower in ["no", "n"]:
             st.session_state.waiting_for_more_info = False
             msg = "Okay! What can I help you with?"
@@ -239,31 +210,29 @@ if prompt:
                 st.write(msg)
             st.session_state.messages.append({"role": "assistant", "content": msg})
             st.stop()
-
         else:
             msg = "Please type Yes or No. Do you want more info?"
             with st.chat_message("assistant"):
                 st.write(msg)
             st.stop()
-
     else:
         st.session_state.messages.append({"role": "user", "content": user_text})
         with st.chat_message("user"):
             st.write(user_text)
 
-    # Build token buffer for model
     messages_for_model = build_token_buffer(st.session_state.messages, MAX_TOKENS)
+    # HARD CLAMP (prevents Anthropic crash)
+while rough_tokens_messages(messages_for_model) > MAX_TOKENS:
+    messages_for_model = messages_for_model[:1] + messages_for_model[-1:]
 
     tokens_sent = rough_tokens_messages(messages_for_model)
     st.sidebar.write(f"Estimated tokens sent: {tokens_sent} / {MAX_TOKENS}")
 
-    # Call chosen vendor
     if vendor_choice.startswith("OpenAI"):
         reply = call_openai(messages_for_model)
     else:
         reply = call_anthropic(messages_for_model)
 
-    # Part C: always ask “Do you want more info?”
     reply = reply + "\n\nDo you want more info?"
 
     with st.chat_message("assistant"):
