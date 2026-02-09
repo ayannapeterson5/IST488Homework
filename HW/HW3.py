@@ -24,7 +24,7 @@ st.write(
 # CONFIG
 # -----------------------------
 OPENAI_PREMIUM_MODEL = "gpt-4o"  # premium OpenAI choice (good default)
-ANTHROPIC_PREMIUM_MODEL = "claude-3-5-sonnet-latest"  # premium Anthropic alias
+ANTHROPIC_PREMIUM_MODEL = "claude-3-sonnet-20240229"  # premium Anthropic alias (fixed)
 
 # If your HW requires a token-budget buffer instead, you can switch memory mode.
 # But per the prompt, we implement ONE option: buffer of 6 messages.
