@@ -1,211 +1,233 @@
 import streamlit as st
-from openai import OpenAI
-import requests
 import time
-import re
-from html import unescape
+import requests
+from html.parser import HTMLParser
 
 # -----------------------------
-# MODELS
+# PAGE SETUP
 # -----------------------------
-OPENAI_MODEL = "gpt-4o"
-ANTHROPIC_MODEL = "claude-3-opus-20240229"
-
-MAX_TOKENS = 2000
-MAX_OUTPUT_TOKENS = 800
-
-st.title("HW 3 – Streaming Chatbot w/ URL Context + Conversation Buffer")
-
-# -----------------------------
-# SIDEBAR OPTIONS
-# -----------------------------
-st.sidebar.header("Options")
-
-url_1 = st.sidebar.text_input("URL 1 (optional)")
-url_2 = st.sidebar.text_input("URL 2 (optional)")
-
-vendor_choice = st.sidebar.selectbox(
-    "Choose LLM (2 vendors)",
-    [
-        f"OpenAI ({OPENAI_MODEL})",
-        f"Anthropic ({ANTHROPIC_MODEL})",
-    ],
-)
+st.set_page_config(page_title="HW 3 – Streaming URL Chatbot", layout="centered")
+st.title("Homework 03 – A Streaming Chatbot that Discusses a URL")
 
 st.write(
     """
 **How this chatbot works**
-- You can input up to **two URLs** in the sidebar.
-- The app reads text from those pages and inserts it into the **system prompt** (permanent context).
-- Conversation memory uses a **token-buffer**: the system prompt is always kept, plus as many recent messages as fit.
-- The assistant response is displayed with a **streaming/typewriter** effect.
+- You can paste up to **two URLs** in the sidebar and click **Load URLs**.
+- The app downloads the pages, extracts readable text, and stores that as **permanent context** inside the **system prompt** (the system prompt is never discarded).
+- **Conversation memory implemented:** **Buffer of 6 messages** (3 user–assistant exchanges).  
+  That means the bot keeps the system prompt + the most recent 6 chat messages (excluding system).
+- Responses stream to the screen as the model generates them.
 """
 )
 
 # -----------------------------
-# SIMPLE HTML → TEXT (no bs4 needed)
+# CONFIG
 # -----------------------------
-def html_to_text(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
-    html = re.sub(r"(?is)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?is)</p\s*>", "\n", html)
-    html = re.sub(r"(?is)<.*?>", " ", html)
-    text = unescape(html)
-    lines = [ln.strip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln]
-    return "\n".join(lines)
+OPENAI_PREMIUM_MODEL = "gpt-4o"  # premium OpenAI choice (good default)
+ANTHROPIC_PREMIUM_MODEL = "claude-3-5-sonnet-latest"  # premium Anthropic alias
 
-def read_url_content(url: str) -> str:
-    try:
-        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        text = html_to_text(r.text)
-        # prevent massive prompts
-        return text[:12000] if len(text) > 12000 else text
-    except Exception as e:
-        return f"[Could not load {url}. Error: {e}]"
+# If your HW requires a token-budget buffer instead, you can switch memory mode.
+# But per the prompt, we implement ONE option: buffer of 6 messages.
+BUFFER_SIZE = 6  # 3 user-assistant exchanges
 
 # -----------------------------
-# TOKEN BUFFER HELPERS
+# SIMPLE HTML -> TEXT STRIPPER
+# (no BeautifulSoup needed)
 # -----------------------------
-def rough_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+class MLStripper(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.fed = []
 
-def rough_tokens_messages(messages: list[dict]) -> int:
-    total = 0
-    for m in messages:
-        total += rough_tokens(m.get("role", ""))
-        total += rough_tokens(m.get("content", ""))
-    return total
+    def handle_data(self, d):
+        self.fed.append(d)
 
-def build_token_buffer(all_messages: list[dict], max_tokens: int) -> list[dict]:
-    if not all_messages:
-        return []
+    def get_data(self):
+        return " ".join(self.fed)
 
-    system_msg = all_messages[0]
-    kept = [system_msg]
-    used = rough_tokens_messages(kept)
 
-    for msg in reversed(all_messages[1:]):
-        msg_tokens = rough_tokens_messages([msg])
-        if used + msg_tokens > max_tokens:
-            break
-        kept.insert(1, msg)
-        used += msg_tokens
+def strip_tags(html: str) -> str:
+    s = MLStripper()
+    s.feed(html)
+    return s.get_data()
 
-    return kept
+
+def read_url_content(url: str, timeout: int = 12, max_chars: int = 12000) -> str:
+    """
+    Re-use idea from HW2: fetch URL and return readable text.
+    This version avoids BeautifulSoup; it strips HTML tags using html.parser.
+    """
+    if not url:
+        return ""
+
+    # Basic safety/cleanup
+    url = url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("URL must start with http:// or https://")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+
+    text = strip_tags(r.text)
+
+    # Clean up whitespace
+    text = " ".join(text.split())
+
+    # Truncate so you don’t blow up context
+    if len(text) > max_chars:
+        text = text[:max_chars] + " ...[TRUNCATED]"
+
+    return text
+
 
 # -----------------------------
-# CLIENTS (OpenAI + Anthropic) — safe init
+# SESSION STATE INIT
 # -----------------------------
-OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
-ANTHROPIC_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+if "url_context" not in st.session_state:
+    st.session_state.url_context = ""  # permanent context inserted into system prompt
 
-if "openai_client" not in st.session_state:
-    st.session_state.openai_client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
-
-if "anthropic_client" not in st.session_state:
-    st.session_state.anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
-
-# -----------------------------
-# SYSTEM PROMPT (URLs as permanent context)
-# -----------------------------
-def build_system_prompt(u1: str, u2: str) -> str:
-    docs = []
-    if u1.strip():
-        docs.append(f"URL 1: {u1}\n\n{read_url_content(u1)}")
-    if u2.strip():
-        docs.append(f"URL 2: {u2}\n\n{read_url_content(u2)}")
-
-    docs_text = "\n\n---\n\n".join(docs) if docs else "No URL context provided."
-
-    return (
-        "You are a helpful chatbot. Explain things so a 10-year-old can understand. "
-        "Be clear, simple, and friendly.\n\n"
-        "Use the following URL documents as context when answering.\n"
-        "If the answer is not in the URLs, say so clearly.\n\n"
-        f"{docs_text}"
-    )
-
-current_urls = (url_1.strip(), url_2.strip())
-if "last_urls" not in st.session_state:
-    st.session_state.last_urls = None
-
-if ("messages" not in st.session_state) or (st.session_state.last_urls != current_urls):
-    st.session_state.messages = [{"role": "system", "content": build_system_prompt(*current_urls)}]
-    st.session_state.last_urls = current_urls
-    st.session_state.waiting_for_more_info = False
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # we will build system prompt dynamically each run
 
 if "waiting_for_more_info" not in st.session_state:
     st.session_state.waiting_for_more_info = False
 
 # -----------------------------
+# SIDEBAR OPTIONS (HW REQUIREMENTS 2 + 3)
+# -----------------------------
+st.sidebar.header("Options")
+
+url1 = st.sidebar.text_input("URL 1 (required for context)", value="")
+url2 = st.sidebar.text_input("URL 2 (optional)", value="")
+
+vendor = st.sidebar.radio("Choose LLM vendor", ["OpenAI", "Anthropic"], index=0)
+
+# “Pick the specific LLM to use” (2 vendors + their premium model)
+if vendor == "OpenAI":
+    model_choice = st.sidebar.selectbox(
+        "OpenAI premium model",
+        options=[OPENAI_PREMIUM_MODEL, "gpt-4o-mini"],
+        index=0,
+    )
+else:
+    model_choice = st.sidebar.selectbox(
+        "Anthropic premium model",
+        options=[ANTHROPIC_PREMIUM_MODEL, "claude-3-5-haiku-latest"],
+        index=0,
+    )
+
+load_clicked = st.sidebar.button("Load URLs")
+
+# -----------------------------
+# LOAD URLS INTO PERMANENT CONTEXT (HW REQUIREMENT 4)
+# -----------------------------
+if load_clicked:
+    parts = []
+    errors = []
+
+    if url1.strip():
+        try:
+            text1 = read_url_content(url1)
+            parts.append(f"URL 1: {url1}\nCONTENT:\n{text1}")
+        except Exception as e:
+            errors.append(f"URL 1 error: {e}")
+
+    if url2.strip():
+        try:
+            text2 = read_url_content(url2)
+            parts.append(f"URL 2: {url2}\nCONTENT:\n{text2}")
+        except Exception as e:
+            errors.append(f"URL 2 error: {e}")
+
+    if parts:
+        st.session_state.url_context = "\n\n---\n\n".join(parts)
+        st.sidebar.success("Loaded URL content into system context!")
+    else:
+        st.session_state.url_context = ""
+        st.sidebar.warning("No URL content loaded.")
+
+    if errors:
+        st.sidebar.error("\n".join(errors))
+
+# -----------------------------
+# SYSTEM PROMPT THAT IS NEVER DISCARDED (HW REQUIREMENT 4)
+# -----------------------------
+def build_system_prompt() -> dict:
+    base = (
+        "You are a helpful chatbot. Explain things so a 10-year-old can understand: clear, simple, friendly.\n"
+        "You MUST use the URL content below as your main context. If the answer is not in the URL content, say so.\n"
+        "If the user asks to compare the two URLs, do it directly.\n"
+    )
+    if st.session_state.url_context.strip():
+        base += "\nURL CONTEXT (permanent):\n" + st.session_state.url_context
+    else:
+        base += "\n(No URL content loaded yet. Ask the user to load URLs in the sidebar.)"
+    return {"role": "system", "content": base}
+
+
+# -----------------------------
+# MEMORY: BUFFER OF 6 MESSAGES (HW REQUIREMENT 5 OPTION 1)
+# Keep system + last 6 non-system messages
+# -----------------------------
+def apply_buffer_memory(all_messages: list[dict]) -> list[dict]:
+    """
+    all_messages already excludes system.
+    Return system + last BUFFER_SIZE messages.
+    """
+    system = build_system_prompt()
+    recent = all_messages[-BUFFER_SIZE:]
+    return [system] + recent
+
+
+# -----------------------------
+# CLIENT SETUP
+# -----------------------------
+def get_openai_client():
+    from openai import OpenAI
+
+    if "openai_client" not in st.session_state:
+        st.session_state.openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    return st.session_state.openai_client
+
+
+def get_anthropic_client():
+    # Anthropic needs `pip install anthropic`
+    # and st.secrets["ANTHROPIC_API_KEY"]
+    import anthropic
+
+    if "anthropic_client" not in st.session_state:
+        st.session_state.anthropic_client = anthropic.Anthropic(
+            api_key=st.secrets["ANTHROPIC_API_KEY"]
+        )
+    return st.session_state.anthropic_client
+
+
+# -----------------------------
 # DISPLAY CHAT HISTORY
 # -----------------------------
 for msg in st.session_state.messages:
-    if msg["role"] == "system":
-        continue
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-# -----------------------------
-# STREAMING
-# -----------------------------
-def stream_text(text: str):
-    for ch in text:
-        yield ch
-        time.sleep(0.01)
+prompt = st.chat_input("Ask about the URL(s)...")
 
 # -----------------------------
-# CALL MODELS
+# MAIN CHAT LOGIC
 # -----------------------------
-def call_openai(messages_for_model: list[dict]) -> str:
-    if st.session_state.openai_client is None:
-        return "OpenAI key not found. Add OPENAI_API_KEY to Streamlit secrets."
-    completion = st.session_state.openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages_for_model,
-        temperature=0,
-    )
-    return completion.choices[0].message.content
-
-def call_anthropic(messages_for_model: list[dict]) -> str:
-    if st.session_state.anthropic_client is None:
-        return "Anthropic key not found. Add ANTHROPIC_API_KEY to Streamlit secrets."
-
-    system_prompt = messages_for_model[0]["content"]
-    convo_msgs = [
-        {"role": m["role"], "content": m["content"]}
-        for m in messages_for_model[1:]
-        if m["role"] in ["user", "assistant"]
-    ]
-
-    resp = st.session_state.anthropic_client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0,
-        system=system_prompt,
-        messages=convo_msgs,
-    )
-    return resp.content[0].text
-
-# -----------------------------
-# CHAT INPUT + LOGIC
-# -----------------------------
-prompt = st.chat_input("Say something...")
-
 if prompt:
     user_text = prompt.strip()
     user_lower = user_text.lower()
 
+    # Handle yes/no loop (kept from your Lab 3)
     if st.session_state.waiting_for_more_info:
         if user_lower in ["yes", "y"]:
-            st.session_state.messages.append({"role": "user", "content": "Yes, please give me more info."})
-            with st.chat_message("user"):
-                st.write("Yes")
+            st.session_state.messages.append(
+                {"role": "user", "content": "Yes, please give me more info."}
+            )
         elif user_lower in ["no", "n"]:
             st.session_state.waiting_for_more_info = False
-            msg = "Okay! What can I help you with?"
+            msg = "Okay! Ask me anything else about the URL(s)."
             with st.chat_message("assistant"):
                 st.write(msg)
             st.session_state.messages.append({"role": "assistant", "content": msg})
@@ -220,24 +242,71 @@ if prompt:
         with st.chat_message("user"):
             st.write(user_text)
 
-    messages_for_model = build_token_buffer(st.session_state.messages, MAX_TOKENS)
-    # HARD CLAMP (prevents Anthropic crash)
-while rough_tokens_messages(messages_for_model) > MAX_TOKENS:
-    messages_for_model = messages_for_model[:1] + messages_for_model[-1:]
+    # Build messages for model using buffer memory
+    messages_for_model = apply_buffer_memory(st.session_state.messages)
 
-    tokens_sent = rough_tokens_messages(messages_for_model)
-    st.sidebar.write(f"Estimated tokens sent: {tokens_sent} / {MAX_TOKENS}")
-
-    if vendor_choice.startswith("OpenAI"):
-        reply = call_openai(messages_for_model)
-    else:
-        reply = call_anthropic(messages_for_model)
-
-    reply = reply + "\n\nDo you want more info?"
+    # -----------------------------
+    # STREAMING RESPONSE
+    # -----------------------------
+    assistant_full = ""
 
     with st.chat_message("assistant"):
-        st.write_stream(stream_text(reply))
+        placeholder = st.empty()
 
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+        def update_stream(text_so_far: str):
+            placeholder.markdown(text_so_far)
+
+        # OpenAI streaming
+        if vendor == "OpenAI":
+            client = get_openai_client()
+            stream = client.chat.completions.create(
+                model=model_choice,
+                messages=messages_for_model,
+                temperature=0,
+                stream=True,
+            )
+
+            for event in stream:
+                delta = event.choices[0].delta
+                if delta and getattr(delta, "content", None):
+                    assistant_full += delta.content
+                    update_stream(assistant_full)
+
+        # Anthropic streaming (if installed + key exists)
+        else:
+            try:
+                client = get_anthropic_client()
+
+                # Anthropic wants system separately; we already built a system msg, so split it out.
+                sys_msg = messages_for_model[0]["content"]
+                non_system = messages_for_model[1:]
+
+                # Convert to Anthropic format: list of {"role": "user"/"assistant", "content": "..."}
+                # (Anthropic also supports richer content blocks, but we’ll keep it simple.)
+                with client.messages.stream(
+                    model=model_choice,
+                    system=sys_msg,
+                    max_tokens=800,
+                    temperature=0,
+                    messages=non_system,
+                ) as stream:
+                    for text in stream.text_stream:
+                        assistant_full += text
+                        update_stream(assistant_full)
+
+            except Exception as e:
+                assistant_full = (
+                    "Anthropic setup error. Make sure you installed `anthropic` and set "
+                    "`ANTHROPIC_API_KEY` in .streamlit/secrets.toml.\n\n"
+                    f"Error details: {e}"
+                )
+                update_stream(assistant_full)
+
+        # Always ask your Lab 3 follow-up question
+        assistant_full += "\n\nDo you want more info?"
+        update_stream(assistant_full)
+
+    # Save assistant response and set waiting flag
+    st.session_state.messages.append({"role": "assistant", "content": assistant_full})
     st.session_state.waiting_for_more_info = True
 
