@@ -1,6 +1,9 @@
 streamlit
-requests
 openai
+anthropic
+requests
+beautifulsoup4
+
 
 
 
