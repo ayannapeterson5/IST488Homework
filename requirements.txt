@@ -1,7 +1,10 @@
 streamlit
-requests
 openai
-anthropic
+chromadb
+beautifulsoup4
+pysqlite3-binary
+
+
 
 
 
