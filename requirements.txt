@@ -1,7 +1,9 @@
-streamlit
+
 openai
-chromadb
+requests
 beautifulsoup4
+PyPDF2
+chromadb
 pysqlite3-binary
 
 
