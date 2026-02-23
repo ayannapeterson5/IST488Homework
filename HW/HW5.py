@@ -1,4 +1,5 @@
 import sys
+import streamlit as st
 
 # =========================================================
 # SQLite FIX (MUST RUN BEFORE chromadb import)
